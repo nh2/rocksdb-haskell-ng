@@ -29,6 +29,36 @@ spec = do
   describe "Compression" compression
   describe "Iterators" iterators
   describe "Obscure conditions" obscure
+  describe "MGet" multiget
+
+multiget :: Spec
+multiget = do
+  it
+    "gets multiple keys"
+    (do let key1 = "key1"
+            val1 = "val1"
+            key2 = "key2"
+            val2 = "val2"
+            key3 = "key3"
+            val3 = "val3"
+        result <-
+          withTempDirCleanedUp
+            (\dir -> do
+               dbh <-
+                 Rocks.open
+                   ((Rocks.defaultOptions (dir </> "demo.db"))
+                    {Rocks.optionsCreateIfMissing = True})
+               Rocks.write
+                 dbh
+                 Rocks.defaultWriteOptions
+                 [Rocks.Put key1 val1, Rocks.Put key2 val2]
+
+               res <- Rocks.mget dbh Rocks.defaultReadOptions [key1, key2, key3]
+               Rocks.close dbh
+               pure res)
+        shouldBe result [Just val1, Just val2, Nothing]
+    )
+
 
 batch :: Spec
 batch = do

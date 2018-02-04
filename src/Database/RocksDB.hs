@@ -16,6 +16,7 @@ module Database.RocksDB
   , Compression(..)
   , close
   , put
+  , mget
   , defaultWriteOptions
   , WriteOptions(..)
   , get
@@ -33,6 +34,8 @@ module Database.RocksDB
   , Iterator
   -- * Misc types
   , RocksDBException(..)
+  -- * Utilities
+  , unsafeUseAsCStringLenList
   ) where
 
 import           Control.Concurrent
@@ -48,6 +51,8 @@ import           Data.IORef
 import           Data.Typeable
 import           Foreign
 import           Foreign.C
+import           Foreign.ForeignPtr.Unsafe (unsafeForeignPtrToPtr)
+import           Foreign.Marshal.Array (withArrayLen, allocaArray)
 #ifndef mingw32_HOST_OS
 import qualified GHC.Foreign as GHC
 #endif
@@ -293,6 +298,105 @@ get dbh readOpts key =
                                    len <- peek vlen_ptr
                                    let !bs = PS fptr 0 (fromIntegral len)
                                    pure (Just bs)))))))
+
+
+-- | multi get a list of @keys@.
+mget :: MonadIO m => DB -> ReadOptions -> [ByteString] -> m [Maybe ByteString]
+mget dbh readOpts keys =
+  liftIO
+    (withDBPtr
+       dbh
+       "mget"
+       (\dbPtr ->
+          unsafeUseAsCStringLenList
+            keys
+            (\cstrs ->
+               do
+                 let (keysPtrs, keysSizes) = unzip cstrs
+                 withArrayLen
+                    keysPtrs
+                    (\numKeys keysArray ->
+                      withArrayLen
+                        keysSizes
+                        (\_ sizesArray ->
+                           do
+                             allocaArray
+                               numKeys
+                               (\valuesArray ->
+                                  allocaArray
+                                    numKeys
+                                    (\vSizesArray ->
+                                       allocaArray
+                                         numKeys
+                                         (\errorsArray ->
+                                           withReadOptions
+                                             readOpts
+                                             (\optsPtr ->
+                                               uninterruptibleMask_
+                                                 (do
+                                                   c_rocksdb_multi_get
+                                                     dbPtr
+                                                     optsPtr
+                                                     (fromIntegral numKeys)
+                                                     keysArray
+                                                     sizesArray
+                                                     valuesArray
+                                                     vSizesArray
+                                                     errorsArray
+
+                                                   vals <- peekArray numKeys valuesArray
+                                                   vsizes <- peekArray numKeys vSizesArray
+                                                   errors <- peekArray numKeys errorsArray
+                                                   errorsBS <- mapM (\cs -> unsafePackCStringWithFinalizer cs c_rocksdb_free_ptr) errors
+                                                   valuesBS <- mapM (\csl -> unsafePackCStringLenWithFinalizer csl c_rocksdb_free_ptr) (zip vals vsizes)
+                                                   -- should return either e value
+                                                   return $ map (\v -> if v == S.empty then Nothing else Just v) valuesBS
+                                                 )
+                                             )
+                                        )
+                                    )
+                               )
+                        )
+                    )
+            )
+       )
+    )
+
+
+unsafePackCStringWithFinalizer :: CString -> FinalizerPtr Word8 -> IO ByteString
+unsafePackCStringWithFinalizer cstr f
+  | cstr == nullPtr = return $! S.empty
+  | otherwise = do
+      fp <- newForeignPtr f (castPtr cstr)
+      l <- c_strlen cstr
+      return $! PS fp 0 (fromIntegral l)
+
+unsafePackCStringLenWithFinalizer :: CStringLen -> FinalizerPtr Word8 -> IO ByteString
+unsafePackCStringLenWithFinalizer (p, l) f
+  | p == nullPtr = return $! S.empty
+  | otherwise = do
+      fptr <- newForeignPtr f (castPtr p)
+      return $! PS fptr 0 (fromIntegral l)
+
+getMaybeByteString :: (Ptr Word8, Int) -> IO (Maybe ByteString)
+getMaybeByteString (p, l) = do
+  fptr <- newForeignPtr c_rocksdb_free_ptr p
+  let !bs = PS fptr 0 (fromIntegral l)
+  return $! Just bs
+
+unsafeUseAsCStringLenList :: [ByteString] -> ([CStringLen] -> IO a) -> IO a
+unsafeUseAsCStringLenList bss f =
+  -- need to get the list of foreign pointers to touch them
+  do
+    let (fps, cstrs) = unzip $ map toCStringLen bss
+    res <- f cstrs
+    mapM_ touchForeignPtr fps
+    return res
+  where
+    toCStringLen :: ByteString -> (ForeignPtr Word8, CStringLen)
+    toCStringLen (PS ps s l) = (ps, ((unsafeForeignPtrToPtr ps) `plusPtr` s, l))
+     -- toCStringLen (PS ps s l) = (ps, ((castPtr (unsafeForeignPtrToPtr ps)) `plusPtr` s, l))
+
 
 -- | Write a batch of operations atomically.
 write :: MonadIO m => DB -> WriteOptions -> [BatchOp] -> m ()
@@ -568,6 +672,17 @@ foreign import ccall safe "rocksdb/c.h rocksdb_get"
                 -> Ptr CSize -- ^ Output length.
                 -> Ptr CString
                 -> IO (Ptr Word8)
+
+foreign import ccall safe "rocksdb/c.h rocksdb_multi_get"
+  c_rocksdb_multi_get :: Ptr CDB
+                      -> Ptr CReadOptions
+                      -> CSize             -- ^ num_keys
+                      -> Ptr (Ptr CChar) -- ^ keys list
+                      -> Ptr Int         -- ^ keys list sizes
+                      -> Ptr (Ptr CChar) -- ^ values list
+                      -> Ptr Int         -- ^ values list sizes
+                      -> Ptr (Ptr CChar) -- ^ errs
+                      -> IO ()
 
 foreign import ccall safe "rocksdb/c.h rocksdb_writeoptions_create"
   c_rocksdb_writeoptions_create :: IO (Ptr CWriteOptions)

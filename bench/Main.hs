@@ -41,6 +41,18 @@ main =
              | n <- [1, 10, 100, 1000]
              ]
          , bgroup
+             "MGet"
+             [ bench
+               ("mget " ++ show n ++ " times")
+               (whnfIO
+                  (ntimes
+                     n
+                     (do Rocks.put db Rocks.defaultWriteOptions "foo" "bar"
+                         _ <- Rocks.mget db Rocks.defaultReadOptions ["foo"]
+                         pure ())))
+             | n <- [1, 10, 100, 1000]
+             ]
+         , bgroup
              "Write"
              [ bench
                ("write " ++ show n ++ " items")
