@@ -16,6 +16,7 @@ module Database.RocksDB
   , Compression(..)
   , close
   , put
+  , merge
   , defaultWriteOptions
   , WriteOptions(..)
   , get
@@ -77,6 +78,7 @@ data ReadOptions = ReadOptions {}
 -- | Batch operation
 data BatchOp
   = Put !ByteString !ByteString
+  | Merge !ByteString !ByteString
   | Del !ByteString
 
 -- | A handle to a RocksDB database. When handle becomes out of reach,
@@ -158,6 +160,8 @@ open config =
                   c_rocksdb_options_set_compression
                     optsPtr
                     (fromIntegral (fromEnum (optionsCompression config)))
+                  c_rocksdb_options_set_uint64add_merge_operator
+                    optsPtr
                   dbhPtr <-
                     bracket
                       (replaceEncoding config)
@@ -251,6 +255,34 @@ put dbh writeOpts key value =
                               val_ptr
                               (fromIntegral vlen)))))))
 
+-- | Merge a @value@ at @key@.
+merge :: MonadIO m => DB -> WriteOptions -> ByteString -> ByteString -> m ()
+merge dbh writeOpts key value =
+  liftIO
+    (withDBPtr
+       dbh
+       "merge"
+       (\dbPtr ->
+          S.unsafeUseAsCStringLen
+            key
+            (\(key_ptr, klen) ->
+               S.unsafeUseAsCStringLen
+                 value
+                 (\(val_ptr, vlen) ->
+                    withWriteOptions
+                      writeOpts
+                      (\optsPtr ->
+                         assertNotError
+                           "merge"
+                           (c_rocksdb_merge
+                              dbPtr
+                              optsPtr
+                              key_ptr
+                              (fromIntegral klen)
+                              val_ptr
+                              (fromIntegral vlen)))))))
+
+
 -- | Get a value at @key@.
 get :: MonadIO m => DB -> ReadOptions -> ByteString -> m (Maybe ByteString)
 get dbh readOpts key =
@@ -324,10 +356,22 @@ write dbh opts batch =
             (fromIntegral klen)
             val_ptr
             (fromIntegral vlen)
+    batchAdd batch_ptr (Merge key val) =
+      S.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
+        S.unsafeUseAsCStringLen val $ \(val_ptr, vlen) ->
+          c_rocksdb_writebatch_merge
+            batch_ptr
+            key_ptr
+            (fromIntegral klen)
+            val_ptr
+            (fromIntegral vlen)
     batchAdd batch_ptr (Del key) =
       S.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
         c_rocksdb_writebatch_delete batch_ptr key_ptr (fromIntegral klen)
     touch (Put (PS p _ _) (PS p' _ _)) = do
+      touchForeignPtr p
+      touchForeignPtr p'
+    touch (Merge (PS p _ _) (PS p' _ _)) = do
       touchForeignPtr p
       touchForeignPtr p'
     touch (Del (PS p _ _)) = touchForeignPtr p
@@ -547,6 +591,9 @@ foreign import ccall safe "rocksdb/c.h rocksdb_options_destroy"
 foreign import ccall safe "rocksdb/c.h rocksdb_options_set_create_if_missing"
   c_rocksdb_options_set_create_if_missing :: Ptr COptions -> Bool -> IO ()
 
+foreign import ccall safe "rocksdb/c.h rocksdb_options_set_uint64add_merge_operator"
+  c_rocksdb_options_set_uint64add_merge_operator :: Ptr COptions -> IO ()
+
 foreign import ccall safe "rocksdb/c.h rocksdb_open"
   c_rocksdb_open :: Ptr COptions -> CString -> Ptr CString -> IO (Ptr CDB)
 
@@ -569,6 +616,14 @@ foreign import ccall safe "rocksdb/c.h rocksdb_get"
                 -> Ptr CString
                 -> IO (Ptr Word8)
 
+foreign import ccall safe "rocksdb/c.h rocksdb_merge"
+  c_rocksdb_merge :: Ptr CDB
+                -> Ptr CWriteOptions
+                -> CString -> CSize
+                -> CString -> CSize
+                -> Ptr CString
+                -> IO ()
+
 foreign import ccall safe "rocksdb/c.h rocksdb_writeoptions_create"
   c_rocksdb_writeoptions_create :: IO (Ptr CWriteOptions)
 
@@ -589,6 +644,12 @@ foreign import ccall safe "rocksdb/c.h rocksdb_writebatch_destroy"
 
 foreign import ccall safe "rocksdb/c.h rocksdb_writebatch_put"
   c_rocksdb_writebatch_put :: Ptr CWriteBatch
+                           -> CString -> CSize
+                           -> CString -> CSize
+                           -> IO ()
+
+foreign import ccall safe "rocksdb/c.h rocksdb_writebatch_merge"
+  c_rocksdb_writebatch_merge :: Ptr CWriteBatch
                            -> CString -> CSize
                            -> CString -> CSize
                            -> IO ()

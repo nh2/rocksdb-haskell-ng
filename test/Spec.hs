@@ -16,6 +16,8 @@ import           System.FilePath
 import           System.IO.Temp
 import           Test.Hspec
 import           Test.QuickCheck
+import           Data.Serialize
+import           Data.Int
 
 main :: IO ()
 main = hspec spec
@@ -29,6 +31,31 @@ spec = do
   describe "Compression" compression
   describe "Iterators" iterators
   describe "Obscure conditions" obscure
+  describe "Merge" merge
+
+merge :: Spec
+merge = do
+  it
+    "merge with uint64add"
+    (do let key = "key"
+            val1 = encode (10 :: Int64)
+            val2 = encode (5 :: Int64)
+            val3 = encode (15 :: Int64)
+        result <-
+          withTempDirCleanedUp
+            (\dir -> do
+               dbh <-
+                 Rocks.open
+                   ((Rocks.defaultOptions (dir </> "demo.db"))
+                    {Rocks.optionsCreateIfMissing = True})
+               Rocks.put dbh Rocks.defaultWriteOptions key val1
+               Rocks.merge dbh Rocks.defaultWriteOptions key val2
+               v <- Rocks.get dbh Rocks.defaultReadOptions key
+               Rocks.delete dbh Rocks.defaultWriteOptions key
+               Rocks.close dbh
+               pure v)
+        shouldBe result (Just val3)
+    )
 
 batch :: Spec
 batch = do
