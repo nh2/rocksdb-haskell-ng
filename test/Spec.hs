@@ -1,6 +1,7 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 -- | Comprehensive aggressive test-suite.
 
@@ -497,23 +498,24 @@ open = do
                         Rocks.close dbh))))
         shouldBe result (Right () :: Either String ()))
   it
-    "Open (unicode filename)"
-    (do result <-
-          fmap
-            (second (const ()) .
-             first (show :: Rocks.RocksDBException -> String))
-            (liftIO
-               (try
-                  (withTempDirCleanedUp
-                     (\dir -> do
-                        unicode <-
-                          getUnicodeString <$> liftIO (generate arbitrary)
-                        dbh <-
-                          Rocks.open
-                            ((Rocks.defaultOptions (dir </> unicode))
-                             {Rocks.optionsCreateIfMissing = True})
-                        Rocks.close dbh))))
-        shouldBe result (Right () :: Either String ()))
+    "Open (unicode filename) creates RocksDB files in the expected dir"
+    (do eResult <- (liftIO
+          (try
+             (withTempDirCleanedUp
+                (\dir -> do
+                   unicode <-
+                     getUnicodeString <$> liftIO (generate arbitrary)
+                   dbh <-
+                     Rocks.open
+                       ((Rocks.defaultOptions (dir </> unicode))
+                        {Rocks.optionsCreateIfMissing = True})
+                   Rocks.close dbh
+                   entries <- filter (`notElem` [".", ".."]) <$> getDirectoryContents (dir </> unicode)
+                   return entries))))
+        let result = case eResult of
+              Left (err :: Rocks.RocksDBException) -> Left (show err)
+              Right x -> Right x
+        result `shouldSatisfy` (\entries -> entries /= Right []))
   it
     "Open then close then open again"
     (do result <-

@@ -48,6 +48,8 @@ import           Data.ByteString.Internal
 import qualified Data.ByteString.Unsafe as S
 import           Data.Coerce
 import           Data.IORef
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
 import           Data.Typeable
 import           Foreign
 import           Foreign.C
@@ -168,11 +170,15 @@ defaultReadOptions = ReadOptions {readOptionsSnapshot = Nothing}
 open :: MonadIO m => Options -> m DB
 open config =
   liftIO
-    (do withFilePath
-          (optionsFilePath config)
+    (do S.useAsCString
+          (T.encodeUtf8 (T.pack (optionsFilePath config)))
           (\pathPtr ->
              withOptions
                (\optsPtr -> do
+                  envUtf8 <- c_rocksdb_create_default_utf8_env
+                  c_rocksdb_options_set_env
+                    optsPtr
+                    envUtf8
                   c_rocksdb_options_set_create_if_missing
                     optsPtr
                     (optionsCreateIfMissing config)
@@ -570,13 +576,6 @@ restoreEncoding _ = pure ()
 restoreEncoding = GHC.setFileSystemEncoding
 #endif
 
-withFilePath :: FilePath -> (CString -> IO a) -> IO a
-# ifdef mingw32_HOST_OS
-withFilePath = withCString
-# else
-withFilePath = GHC.withCString GHC.utf8
-# endif
-
 -- | Copy the given CString, because we can't adopt it.
 --
 -- If the string is NULL, just return Nothing.
@@ -615,6 +614,7 @@ assertNotError label f =
 -- Foreign (unsafe) bindings
 
 data COptions
+data CEnv
 data CWriteOptions
 data CWriteBatch
 data CReadOptions
@@ -630,6 +630,9 @@ foreign import ccall safe "rocksdb/c.h rocksdb_options_destroy"
 
 foreign import ccall safe "rocksdb/c.h rocksdb_options_set_create_if_missing"
   c_rocksdb_options_set_create_if_missing :: Ptr COptions -> Bool -> IO ()
+
+foreign import ccall safe "rocksdb/c.h rocksdb_create_default_utf8_env"
+  c_rocksdb_create_default_utf8_env :: IO (Ptr CEnv)
 
 foreign import ccall safe "rocksdb/c.h rocksdb_open"
   c_rocksdb_open :: Ptr COptions -> CString -> Ptr CString -> IO (Ptr CDB)
@@ -708,6 +711,9 @@ foreign import ccall safe "rocksdb/c.h rocksdb_release_snapshot"
 
 foreign import ccall safe "rocksdb/c.h rocksdb_readoptions_set_snapshot"
   c_rocksdb_readoptions_set_snapshot :: Ptr CReadOptions -> Ptr CSnapshot -> IO ()
+
+foreign import ccall safe "rocksdb/c.h rocksdb_options_set_env"
+  c_rocksdb_options_set_env :: Ptr COptions -> Ptr CEnv -> IO ()
 
 foreign import ccall safe "rocksdb/c.h rocksdb_iter_destroy"
   c_rocksdb_iter_destroy :: Ptr CIterator -> IO ()
